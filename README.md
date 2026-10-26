@@ -94,14 +94,14 @@ python cuaca.py --search "gianyar" --full
 ### Will it rain?
 
 ```bash
-python cuaca.py --rain            # next 24 hours (default)
+python cuaca.py --rain            # next 48 hours (default): tonight and tomorrow
 python cuaca.py --rain 6          # next 6 hours (1-72)
 python cuaca.py --search "sanur" --rain
 ```
 
 ```
 🌧  Rain outlook for Ubud, Ubud, KAB. GIANYAR, BALI
-   next 24 h · local time there: Thu 20 Aug, 13:30
+   next 48 h · local time there: Thu 20 Aug, 13:30
 ============================================================
 Rain expected from 18:00 (in about 4h 30m), until about 00:00 tomorrow.
 Again from 12:00 tomorrow until about 18:00 tomorrow.
@@ -119,8 +119,19 @@ BMKG's public forecast gives each 3-hour slot a weather *category* (e.g.
 A slot counts as rainy if its category is a rain/thunder one, **or** its
 precipitation estimate is at least 1 mm (`RAIN_MM_THRESHOLD` in the script).
 Trace amounts such as 0.1 mm under "Berawan" are shown but not called rain.
-Times are accurate to the 3-hour slots, not to the minute, and the feed starts
-at the upcoming slot, so there is no "now" slot. Rainy spells that continue
+Each slot is a snapshot, not a summary of the whole 3 hours, and the feed starts
+at the upcoming slot, so there is no "now" slot. **A brief or very local shower
+between slots, or one happening right now, can be missed**, so "no rain
+forecast" means "no rainy slot in BMKG's forecast", not "it won't rain".
+Tropical showers are patchy; check BMKG's radar if it looks wet outside, and
+don't be surprised if another provider (AccuWeather etc.) disagrees. The
+output shows when BMKG issued the forecast, so you can judge how fresh it is.
+
+**Why this can differ from BMKG's website:** the website's regency pages show one
+*daily* summary per district (kecamatan) for 10 days, while this tool reads the
+village-level (adm4) 3-hourly forecast, which only runs about 3 days ahead. They
+are different BMKG products and can disagree, for example "Hujan Ringan" for a
+whole district while your village's slots stay dry. Rainy spells that continue
 past your window are followed to their end, and the window's total
 precipitation is reported.
 
@@ -160,7 +171,8 @@ python cuaca.py --location --json | jq
 and the default (no-args) mode. With `--rain` the body is a `rain` object
 (`will_rain`, `raining_now`, `starts`, `starts_in_minutes`, `ends`, `episodes`,
 `heaviest`, `total_precipitation_mm`, and every slot in the window flagged `wet`).
-Every slot also carries `precipitation_mm`. When combined with `--search`, it auto-picks the top
+Every slot also carries `precipitation_mm`, and the top level has
+`forecast_issued_utc` (when BMKG's model run was issued). When combined with `--search`, it auto-picks the top
 match instead of prompting (like `--yes`), since a JSON/piped workflow can't
 answer an interactive prompt.
 

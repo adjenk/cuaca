@@ -440,6 +440,12 @@ def _add_warning(result, msg):
     result["warning"] = f"{result['warning']} {msg}" if result.get("warning") else msg
 
 
+def _add_issued(result, slots):
+    issued = forecast_issued(slots)
+    if issued is not None:
+        result["forecast_issued_utc"] = issued.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _add_cache_info(result, fc):
     if fc.cache_age is not None:
         result["cache"] = {"age_seconds": int(fc.cache_age), "offline_fallback": fc.offline}
@@ -483,6 +489,31 @@ def region_now(flat_forecasts, now_utc=None):
             except (KeyError, ValueError):
                 continue
     return datetime.now()
+
+
+def forecast_issued(slots):
+    """When BMKG's model run behind this forecast was issued (naive UTC), or None."""
+    for block in slots:
+        raw = block.get("analysis_date")
+        if raw:
+            for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
+                try:
+                    return datetime.strptime(raw, fmt)
+                except (TypeError, ValueError):
+                    continue
+        break
+    return None
+
+
+def issued_note(slots, now_utc=None):
+    """'Forecast issued 26 Oct 00:00 UTC (11h 23m ago).' or None if BMKG didn't say."""
+    issued = forecast_issued(slots)
+    if issued is None:
+        return None
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    age = human_duration((now_utc - issued).total_seconds())
+    return f"BMKG forecast issued {issued:%d %b %H:%M} UTC ({age} ago)."
 
 
 def pick_next_forecast(flat_forecasts, now_local):
@@ -581,6 +612,7 @@ def build_forecast_json(adm4_code, display_name=None, full=False, refresh=False)
         "source": SOURCE,
     }
     _add_cache_info(result, fc)
+    _add_issued(result, flat_forecasts)
 
     if not flat_forecasts:
         result["forecasts"] = []
@@ -645,6 +677,8 @@ def fetch_and_print_weather(adm4_code, display_name=None, full=False, refresh=Fa
         "with wind, cloud cover, and visibility for every slot.)"
     )
     print(f"\nSource: {SOURCE}")
+    if issued_note(flat_forecasts):
+        print(issued_note(flat_forecasts))
     if footer_note:
         print(footer_note)
     return label
@@ -659,7 +693,9 @@ def fetch_and_print_weather(adm4_code, display_name=None, full=False, refresh=Fa
 
 SLOT = timedelta(hours=3)
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
-DEFAULT_RAIN_HOURS = 24
+# 48, not 24: "will it rain?" almost always means tonight *and* tomorrow. A 24-hour
+# window run in the evening stops mid-afternoon tomorrow and misses evening rain.
+DEFAULT_RAIN_HOURS = 48
 MAX_RAIN_HOURS = 72
 ONELINE_RAIN_HOURS = 12
 
@@ -829,7 +865,7 @@ def rain_phrase(an, now_local):
     if an["will_rain"] is None:
         return "forecast out of date"
     if not an["will_rain"]:
-        return f"dry next {an['window_hours']}h"
+        return f"no rain forecast ({an['window_hours']}h)"
     end = datetime.strptime(an["ends"], DATETIME_FMT) if an["ends"] else None
     if an["raining_now"]:
         return f"raining until ~{_time_with_day(end, now_local)}" if end else "raining, no end in forecast"
@@ -848,6 +884,7 @@ def build_rain_json(adm4_code, display_name=None, hours=DEFAULT_RAIN_HOURS, refr
         "rain": an,
     }
     _add_cache_info(result, fc)
+    _add_issued(result, fc.slots)
     if an["will_rain"] is None:
         _add_warning(result, STALE_WARNING)
     return result
@@ -888,7 +925,15 @@ def print_rain(adm4_code, display_name=None, hours=DEFAULT_RAIN_HOURS, refresh=F
         print(f" BMKG's precipitation estimate for the window: {total:g} mm." if total is not None else "")
     if an["forecast_ends"] and now + timedelta(hours=hours) > datetime.strptime(an["forecast_ends"], DATETIME_FMT):
         print(f"  (BMKG's forecast only runs until {an['forecast_ends']}.)")
+    if an["will_rain"] is False:
+        print(
+            "\nNote: BMKG gives one weather snapshot per 3 hours for this village. A brief or "
+            "very local shower between slots, or one happening right now, won't show up here; "
+            "check BMKG's radar if it looks wet outside."
+        )
     print(f"\nSource: {SOURCE}")
+    if issued_note(fc.slots):
+        print(issued_note(fc.slots))
     if footer_note:
         print(footer_note)
     return label

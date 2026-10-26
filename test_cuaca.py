@@ -10,7 +10,7 @@ import pytest
 import requests
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import bmkg_weather as b  # noqa: E402
+import cuaca as b  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def isolated_cache(tmp_path, monkeypatch):
@@ -540,7 +540,7 @@ def test_rain_json_output(wired, capsys):
     assert data["location"]["code"] == CODE
 
 
-def test_bare_rain_flag_defaults_to_24h_and_does_not_eat_next_flag():
+def test_bare_rain_flag_uses_default_window_and_does_not_eat_next_flag():
     args = b.build_parser().parse_args(["--rain", "--json"])
     assert args.rain == b.DEFAULT_RAIN_HOURS and args.json
     assert b.build_parser().parse_args(["--rain", "9"]).rain == 9
@@ -565,7 +565,7 @@ def test_oneline_dry(monkeypatch, db, capsys):
     monkeypatch.setattr(b, "load_wilayah", lambda *a, **k: db)
     monkeypatch.setattr(b, "region_now", lambda flat, now_utc=None: datetime(2026, 8, 20, 13, 30))
     b.main(["--code", CODE, "--oneline"])
-    assert capsys.readouterr().out.strip().endswith("| dry next 12h")
+    assert capsys.readouterr().out.strip().endswith("| no rain forecast (12h)")
 
 
 def test_oneline_stale_data(monkeypatch, db, capsys):
@@ -724,6 +724,70 @@ def test_full_output_survives_missing_precipitation(capsys):
     b.print_full_forecast([REAL_SLOT, dict(REAL_SLOT, tp=None, local_datetime="2026-10-24 00:00:00")])
     out = capsys.readouterr().out
     assert "None" not in out and "rain  0.1mm" in out
+
+
+# ====================================================== forecast age & honest wording
+def test_forecast_issued_and_age():
+    assert b.forecast_issued([REAL_SLOT]) == datetime(2026, 10, 24, 0, 0)
+    note = b.issued_note([REAL_SLOT], now_utc=datetime(2026, 10, 24, 12, 34))
+    assert note == "BMKG forecast issued 24 Oct 00:00 UTC (12h 34m ago)."
+
+
+def test_issued_note_absent_when_bmkg_omits_it():
+    assert b.forecast_issued([dict(REAL_SLOT, analysis_date=None)]) is None
+    assert b.issued_note([dict(REAL_SLOT, analysis_date="garbage")]) is None
+    assert b.issued_note([]) is None
+
+
+def dry_cli(monkeypatch, db):
+    slots = series(["Cerah Berawan", "Cerah", "Cerah", "Cerah"], start="2026-08-20 15:00:00")
+    for sl in slots:
+        sl["analysis_date"] = "2026-08-20T00:00:00"
+    monkeypatch.setattr(b.requests, "get", lambda *a, **k: FakeResp(payload(slots)))
+    monkeypatch.setattr(b, "load_wilayah", lambda *a, **k: db)
+    monkeypatch.setattr(b, "region_now", lambda f, now_utc=None: datetime(2026, 8, 20, 13, 30))
+
+
+def test_dry_rain_output_states_its_limits(monkeypatch, db, capsys):
+    dry_cli(monkeypatch, db)
+    assert b.main(["--code", CODE, "--rain"]) == 0
+    out = capsys.readouterr().out
+    assert "No rain forecast in the next 48 hours." in out
+    assert "one weather snapshot per 3 hours" in out and "right now" in out
+    assert "BMKG forecast issued 20 Aug 00:00 UTC" in out
+
+
+def test_rainy_output_has_no_dry_caveat(wired, capsys):
+    b.main(["--code", CODE, "--rain"])
+    assert "one weather snapshot per 3 hours" not in capsys.readouterr().out
+
+
+def test_default_view_and_json_show_issue_time(monkeypatch, db, capsys):
+    dry_cli(monkeypatch, db)
+    b.main(["--code", CODE])
+    assert "BMKG forecast issued 20 Aug 00:00 UTC" in capsys.readouterr().out
+    b.main(["--code", CODE, "--json"])
+    assert json.loads(capsys.readouterr().out)["forecast_issued_utc"] == "2026-08-20T00:00:00Z"
+    b.main(["--code", CODE, "--rain", "--json"])
+    assert json.loads(capsys.readouterr().out)["forecast_issued_utc"] == "2026-08-20T00:00:00Z"
+
+
+def test_default_window_covers_tomorrow_evening():
+    """Regression: at 19:23 a 24h window ended before Tuesday 20:00/23:00 slots, so
+    BMKG's 'light rain tomorrow' was reported as 'no rain'."""
+    t0 = datetime(2026, 10, 26, 20, 0)
+    from datetime import timedelta
+    slots = []
+    for i in range(24):
+        loc = t0 + timedelta(hours=3 * i)
+        wet = loc == datetime(2026, 10, 27, 23, 0)
+        slots.append(slot(loc.strftime(b.DATETIME_FMT), (loc - timedelta(hours=8)).strftime(b.DATETIME_FMT),
+                          weather_desc="Hujan Ringan" if wet else "Cerah Berawan"))
+    now = datetime(2026, 10, 26, 19, 23)
+    assert b.DEFAULT_RAIN_HOURS == 48
+    assert b.analyze_rain(slots, now, 24)["will_rain"] is False   # the old default's blind spot
+    an = b.analyze_rain(slots, now, b.DEFAULT_RAIN_HOURS)
+    assert an["will_rain"] and an["starts"] == "2026-10-27 23:00:00"
 
 
 if __name__ == "__main__":  # allow `python test_cuaca.py`
